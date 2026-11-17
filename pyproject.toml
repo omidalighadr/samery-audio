@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "samery-audio"
+version = "0.1.0"
+description = "Inspect lossless audio and compare decoded PCM using FFmpeg"
+readme = "README.md"
+requires-python = ">=3.10"
+
+[project.scripts]
+samery-audio = "samery_audio.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
