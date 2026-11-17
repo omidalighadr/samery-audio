@@ -33,9 +33,7 @@ class PCMIntegrationTests(unittest.TestCase):
         for index in range(4096):
             for channel in range(channels):
                 value = int(
-                    math.sin(index * (0.031 + channel * 0.019))
-                    * ((1 << (bits - 1)) - 1)
-                    * 0.7
+                    math.sin(index * (0.031 + channel * 0.019)) * ((1 << (bits - 1)) - 1) * 0.7
                 )
                 if changed and index == 100 and channel == 0:
                     value += 1
@@ -145,9 +143,7 @@ class PCMIntegrationTests(unittest.TestCase):
                 1,
             )
             self.assertEqual(
-                cli_main(
-                    ["compare", str(source), str(self.root / "missing.wav"), "--json"]
-                ),
+                cli_main(["compare", str(source), str(self.root / "missing.wav"), "--json"]),
                 2,
             )
 
@@ -161,6 +157,184 @@ class PCMIntegrationTests(unittest.TestCase):
         with patch.object(pcm_verify, "pcm_sha256", side_effect=change_input):
             with self.assertRaises(pcm_verify.VerificationError):
                 pcm_verify.compare(source, source)
+
+    def test_empty_wav_cannot_pass_verification(self):
+        path = self.root / "empty.wav"
+        with wave.open(str(path), "wb") as output:
+            output.setnchannels(2)
+            output.setsampwidth(2)
+            output.setframerate(44100)
+            output.writeframes(b"")
+        with self.assertRaises(pcm_verify.VerificationError) as error:
+            pcm_verify.compare(path, path)
+        self.assertEqual(error.exception.code, "empty_audio")
+        # Inspection explicitly describes headers, rather than claiming full verification.
+        self.assertEqual(pcm_verify.probe(path).sample_rate, 44100)
+        with contextlib.redirect_stdout(io.StringIO()) as output:
+            code = cli_main(["compare", str(path), str(path), "--json"])
+        self.assertEqual(code, 2)
+        self.assertEqual(json.loads(output.getvalue())["code"], "empty_audio")
+
+    def test_silence_with_samples_is_valid(self):
+        source = self.root / "silence.wav"
+        with wave.open(str(source), "wb") as output:
+            output.setnchannels(2)
+            output.setsampwidth(2)
+            output.setframerate(44100)
+            output.writeframes(b"\0" * 4096)
+        candidate = self.convert(source, "silence.flac", "-c:a", "flac")
+        self.assertTrue(pcm_verify.compare(source, candidate).equivalent)
+
+    def test_only_first_audio_stream_is_compared(self):
+        source = self.wav()
+        other = self.wav("other.wav", changed=True)
+        multiple = self.root / "multiple.mka"
+        subprocess.run(
+            [
+                "ffmpeg",
+                "-nostdin",
+                "-v",
+                "error",
+                "-y",
+                "-i",
+                str(source),
+                "-i",
+                str(other),
+                "-map",
+                "0:a",
+                "-map",
+                "1:a",
+                "-c:a",
+                "flac",
+                str(multiple),
+            ],
+            check=True,
+            capture_output=True,
+        )
+        self.assertTrue(pcm_verify.compare(source, multiple).equivalent)
+        self.assertFalse(pcm_verify.compare(other, multiple).equivalent)
+
+    def test_aiff_big_endian_preserves_samples(self):
+        for bits in (16, 24, 32):
+            with self.subTest(bits=bits):
+                source = self.wav(bits=bits)
+                aiff = self.convert(source, "candidate.aiff", "-c:a", f"pcm_s{bits}be")
+                self.assertTrue(pcm_verify.compare(source, aiff).equivalent)
+
+    def test_padding_16_to_24_bits_is_a_format_difference(self):
+        source = self.wav()
+        padded = self.convert(source, "padded.wav", "-c:a", "pcm_s24le")
+        report = pcm_verify.compare(source, padded)
+        self.assertEqual(report.source_sha256, report.candidate_sha256)
+        self.assertEqual(report.differences, ("bit_depth",))
+
+    def test_floating_point_and_8_bit_pcm_are_rejected(self):
+        source = self.wav()
+        for codec in ("pcm_f32le", "pcm_u8"):
+            with self.subTest(codec=codec):
+                unsupported = self.convert(source, "unsupported.wav", "-c:a", codec)
+                with self.assertRaises(pcm_verify.VerificationError) as error:
+                    pcm_verify.compare(source, unsupported)
+                self.assertEqual(error.exception.code, "unsupported_audio")
+
+    def test_six_channel_layout_and_channel_order(self):
+        source = self.root / "surround.flac"
+        signals = "|".join(f"0.1*sin(2*PI*{211 + channel * 97}*t)" for channel in range(6))
+        subprocess.run(
+            [
+                "ffmpeg",
+                "-nostdin",
+                "-v",
+                "error",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                f"aevalsrc={signals}:s=48000:d=0.1:c=5.1",
+                "-c:a",
+                "flac",
+                str(source),
+            ],
+            check=True,
+            capture_output=True,
+        )
+        wav = self.convert(source, "surround.wav", "-c:a", "pcm_s24le")
+        self.assertTrue(pcm_verify.compare(source, wav).equivalent)
+        swapped = self.convert(
+            source,
+            "swapped.flac",
+            "-af",
+            "pan=5.1|c0=c1|c1=c0|c2=c2|c3=c3|c4=c4|c5=c5",
+            "-c:a",
+            "flac",
+        )
+        self.assertIn("decoded_pcm", pcm_verify.compare(source, swapped).differences)
+
+    def test_two_minute_audio_conversion(self):
+        source = self.root / "long.wav"
+        subprocess.run(
+            [
+                "ffmpeg",
+                "-nostdin",
+                "-v",
+                "error",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=997:sample_rate=48000:duration=120",
+                "-ac",
+                "2",
+                "-c:a",
+                "pcm_s24le",
+                str(source),
+            ],
+            check=True,
+            capture_output=True,
+        )
+        candidate = self.convert(source, "long.flac", "-c:a", "flac")
+        self.assertTrue(pcm_verify.compare(source, candidate).equivalent)
+
+    def test_unicode_spaces_and_option_like_filename(self):
+        source = self.wav("-آهنگ test.wav")
+        candidate = self.convert(source, "صدای جدید.flac", "-c:a", "flac")
+        self.assertTrue(pcm_verify.compare(source, candidate).equivalent)
+
+    def test_deleted_input_raises_library_error(self):
+        source = self.wav()
+        candidate = self.wav("copy.wav")
+
+        def remove_input(*args, **kwargs):
+            source.unlink(missing_ok=True)
+            return "1" * 64
+
+        with patch.object(pcm_verify, "pcm_sha256", side_effect=remove_input):
+            with self.assertRaises(pcm_verify.VerificationError) as error:
+                pcm_verify.compare(source, candidate)
+        self.assertEqual(error.exception.code, "file_access_error")
+
+    def test_custom_executable_paths(self):
+        source = self.wav()
+        self.assertTrue(
+            pcm_verify.compare(
+                source, source, ffmpeg=shutil.which("ffmpeg"), ffprobe=shutil.which("ffprobe")
+            ).equivalent
+        )
+
+    def test_truncated_pcm_is_rejected(self):
+        source = self.wav()
+        truncated = self.root / "truncated.wav"
+        truncated.write_bytes(source.read_bytes()[:-3])
+        with self.assertRaises(pcm_verify.VerificationError) as error:
+            pcm_verify.compare(source, truncated)
+        self.assertEqual(error.exception.code, "decode_failed")
+
+    def test_cli_human_error_does_not_include_private_path(self):
+        with contextlib.redirect_stderr(io.StringIO()) as output:
+            code = cli_main(["inspect", str(self.root / "private-name.wav")])
+        self.assertEqual(code, 2)
+        self.assertIn("file_not_found", output.getvalue())
+        self.assertNotIn("private-name", output.getvalue())
 
 
 class ProcessErrorTests(unittest.TestCase):
@@ -176,9 +350,7 @@ class ProcessErrorTests(unittest.TestCase):
             pcm_verify._run(["this-executable-does-not-exist"], 1)
 
     def test_timeout_is_clear(self):
-        with patch(
-            "subprocess.run", side_effect=subprocess.TimeoutExpired("ffmpeg", 1)
-        ):
+        with patch("subprocess.run", side_effect=subprocess.TimeoutExpired("ffmpeg", 1)):
             with self.assertRaises(pcm_verify.VerificationError):
                 pcm_verify._run(["ffmpeg"], 1)
 
@@ -190,6 +362,99 @@ class ProcessErrorTests(unittest.TestCase):
             with self.assertRaises(pcm_verify.VerificationError) as error:
                 pcm_verify._run(["ffmpeg"], 1)
         self.assertNotIn("private filename", str(error.exception))
+
+    def test_probe_and_decode_errors_are_distinct(self):
+        for operation in ("probe", "decode"):
+            with (
+                self.subTest(operation=operation),
+                patch(
+                    "subprocess.run", return_value=subprocess.CompletedProcess([], 7, "", "private")
+                ),
+            ):
+                with self.assertRaises(pcm_verify.VerificationError) as error:
+                    pcm_verify._run(["binary"], 1, operation=operation)
+                self.assertEqual(error.exception.code, f"{operation}_failed")
+                self.assertEqual(error.exception.operation, operation)
+                self.assertEqual(error.exception.returncode, 7)
+                self.assertNotIn("private", str(error.exception))
+
+    def test_execution_permission_error_is_normalized(self):
+        with patch("subprocess.run", side_effect=PermissionError("private executable")):
+            with self.assertRaises(pcm_verify.VerificationError) as error:
+                pcm_verify._run(["binary"], 1)
+        self.assertEqual(error.exception.code, "tool_execution_failed")
+
+    def test_invalid_metadata_is_normalized(self):
+        invalid = [
+            "bad json",
+            "{}",
+            '{"streams": []}',
+            '{"streams": [null]}',
+            '{"streams": [{"codec_name": []}]}',
+        ]
+        with tempfile.NamedTemporaryFile() as source:
+            for raw in invalid:
+                with self.subTest(raw=raw), patch.object(pcm_verify, "_run", return_value=raw):
+                    with self.assertRaises(pcm_verify.VerificationError) as error:
+                        pcm_verify.probe(source.name)
+                    self.assertEqual(error.exception.code, "invalid_metadata")
+
+    def test_multichannel_without_layout_is_rejected(self):
+        metadata = {
+            "streams": [
+                {
+                    "codec_name": "flac",
+                    "sample_rate": "48000",
+                    "channels": 6,
+                    "bits_per_raw_sample": "24",
+                }
+            ]
+        }
+        with (
+            tempfile.NamedTemporaryFile() as source,
+            patch.object(pcm_verify, "_run", return_value=json.dumps(metadata)),
+        ):
+            with self.assertRaises(pcm_verify.VerificationError) as error:
+                pcm_verify.probe(source.name)
+        self.assertEqual(error.exception.code, "unknown_channel_layout")
+
+    def test_missing_file_and_directory_have_distinct_codes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            for path, code in [
+                (Path(directory) / "missing", "file_not_found"),
+                (Path(directory), "not_a_file"),
+            ]:
+                with self.subTest(code=code):
+                    with self.assertRaises(pcm_verify.VerificationError) as error:
+                        pcm_verify.probe(path)
+                    self.assertEqual(error.exception.code, code)
+
+    def test_file_permission_error_is_normalized(self):
+        with patch.object(Path, "stat", side_effect=PermissionError("private input")):
+            with self.assertRaises(pcm_verify.VerificationError) as error:
+                pcm_verify.probe("input.wav")
+        self.assertEqual(error.exception.code, "file_access_error")
+        self.assertNotIn("private input", str(error.exception))
+
+    def test_invalid_timeout_precedes_file_access(self):
+        for function, args in [
+            (pcm_verify.probe, ("missing.wav",)),
+            (pcm_verify.compare, ("missing.wav", "missing.wav")),
+        ]:
+            for timeout in (0, -1, float("nan"), float("inf")):
+                with self.subTest(function=function.__name__, timeout=timeout):
+                    with self.assertRaises(pcm_verify.VerificationError) as error:
+                        function(*args, timeout=timeout)
+                    self.assertEqual(error.exception.code, "invalid_timeout")
+
+    def test_version_command(self):
+        from samery_audio import __version__
+
+        with contextlib.redirect_stdout(io.StringIO()) as output:
+            with self.assertRaises(SystemExit) as error:
+                cli_main(["--version"])
+        self.assertEqual(error.exception.code, 0)
+        self.assertEqual(output.getvalue().strip(), f"samery-audio {__version__}")
 
 
 if __name__ == "__main__":
