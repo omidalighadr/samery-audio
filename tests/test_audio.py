@@ -77,6 +77,84 @@ class PCMIntegrationTests(unittest.TestCase):
                         self.assertEqual(report.source.bit_depth, bits)
                         self.assertEqual(report.source_sha256, report.candidate_sha256)
 
+    def test_verify_supported_files_without_reference(self):
+        source = self.wav(bits=24)
+        expected = pcm_verify.compare(source, source).source_sha256
+        files = [
+            source,
+            self.convert(source, "verify.flac", "-c:a", "flac"),
+            self.convert(source, "verify.m4a", "-c:a", "alac"),
+            self.convert(source, "verify.aiff", "-c:a", "pcm_s24be"),
+        ]
+        for path in files:
+            with self.subTest(container=path.suffix):
+                report = pcm_verify.verify(path)
+                self.assertEqual(report.pcm_sha256, expected)
+                self.assertEqual(report.audio.bit_depth, 24)
+                self.assertEqual(report.audio.sample_rate, 44100)
+
+    def test_verify_cli_json_report(self):
+        source = self.wav()
+        with contextlib.redirect_stdout(io.StringIO()) as output:
+            code = cli_main(["verify", str(source), "--json"])
+        report = json.loads(output.getvalue())
+        self.assertEqual(code, 0)
+        self.assertEqual(report["audio"]["codec"], "pcm_s16le")
+        self.assertEqual(report["pcm_sha256"], pcm_verify.verify(source).pcm_sha256)
+
+    def test_verify_cli_human_report(self):
+        with contextlib.redirect_stdout(io.StringIO()) as output:
+            code = cli_main(["verify", str(self.wav())])
+        self.assertEqual(code, 0)
+        self.assertIn("PASS:", output.getvalue())
+        self.assertIn("PCM SHA-256:", output.getvalue())
+
+    def test_verify_cli_errors_are_structured(self):
+        damaged = self.root / "damaged.wav"
+        damaged.write_bytes(self.wav().read_bytes()[:-3])
+        for path, expected in [
+            (self.root / "missing.flac", "file_not_found"),
+            (damaged, "decode_failed"),
+        ]:
+            with (
+                self.subTest(expected=expected),
+                contextlib.redirect_stdout(io.StringIO()) as output,
+            ):
+                code = cli_main(["verify", str(path), "--json"])
+            self.assertEqual(code, 2)
+            self.assertEqual(json.loads(output.getvalue())["code"], expected)
+            self.assertNotIn(str(self.root), output.getvalue())
+
+    def test_verify_rejects_input_changed_or_deleted_during_decode(self):
+        for action, expected in [("modify", "input_changed"), ("delete", "file_access_error")]:
+            source = self.wav()
+
+            def change_input(*args, action=action, source=source, **kwargs):
+                if action == "modify":
+                    source.write_bytes(source.read_bytes() + b"changed")
+                else:
+                    source.unlink()
+                return "1" * 64
+
+            with (
+                self.subTest(action=action),
+                patch.object(pcm_verify, "pcm_sha256", side_effect=change_input),
+            ):
+                with self.assertRaises(pcm_verify.VerificationError) as error:
+                    pcm_verify.verify(source)
+            self.assertEqual(error.exception.code, expected)
+
+    def test_verify_custom_executables_and_missing_decoder(self):
+        source = self.wav()
+        report = pcm_verify.verify(
+            source, ffmpeg=shutil.which("ffmpeg"), ffprobe=shutil.which("ffprobe")
+        )
+        self.assertEqual(report.audio.channels, 2)
+        with self.assertRaises(pcm_verify.VerificationError) as error:
+            pcm_verify.verify(source, ffmpeg="this-decoder-does-not-exist")
+        self.assertEqual(error.exception.code, "tool_not_found")
+        self.assertEqual(error.exception.operation, "decode")
+
     def test_32_bit_pcm_is_preserved(self):
         source = self.wav(bits=32)
         candidate = self.wav("copy.wav", bits=32)
@@ -123,6 +201,9 @@ class PCMIntegrationTests(unittest.TestCase):
         lossy = self.convert(source, "lossy.m4a", "-c:a", "aac")
         with self.assertRaises(pcm_verify.VerificationError):
             pcm_verify.compare(lossy, source)
+        with self.assertRaises(pcm_verify.VerificationError) as error:
+            pcm_verify.verify(lossy)
+        self.assertEqual(error.exception.code, "unsupported_audio")
 
     def test_corrupt_input_is_rejected(self):
         invalid = self.root / "invalid.flac"
@@ -167,6 +248,9 @@ class PCMIntegrationTests(unittest.TestCase):
             output.writeframes(b"")
         with self.assertRaises(pcm_verify.VerificationError) as error:
             pcm_verify.compare(path, path)
+        self.assertEqual(error.exception.code, "empty_audio")
+        with self.assertRaises(pcm_verify.VerificationError) as error:
+            pcm_verify.verify(path)
         self.assertEqual(error.exception.code, "empty_audio")
         # Inspection explicitly describes headers, rather than claiming full verification.
         self.assertEqual(pcm_verify.probe(path).sample_rate, 44100)
@@ -328,6 +412,9 @@ class PCMIntegrationTests(unittest.TestCase):
         with self.assertRaises(pcm_verify.VerificationError) as error:
             pcm_verify.compare(source, truncated)
         self.assertEqual(error.exception.code, "decode_failed")
+        with self.assertRaises(pcm_verify.VerificationError) as error:
+            pcm_verify.verify(truncated)
+        self.assertEqual(error.exception.code, "decode_failed")
 
     def test_cli_human_error_does_not_include_private_path(self):
         with contextlib.redirect_stderr(io.StringIO()) as output:
@@ -439,6 +526,7 @@ class ProcessErrorTests(unittest.TestCase):
     def test_invalid_timeout_precedes_file_access(self):
         for function, args in [
             (pcm_verify.probe, ("missing.wav",)),
+            (pcm_verify.verify, ("missing.wav",)),
             (pcm_verify.compare, ("missing.wav", "missing.wav")),
         ]:
             for timeout in (0, -1, float("nan"), float("inf")):

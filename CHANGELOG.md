@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.0
+
+- Add `verify(path)` and `samery-audio verify` to decode one supported audio stream without a reference file.
+- Return immutable audio properties and the decoded PCM SHA-256 digest, with JSON output from the CLI.
+- Reject empty streams and decoder-reported corruption, and check that the input stayed stable while being verified.
+- Reuse the existing comparison fingerprint checks without changing comparison reports or exit codes.
+- Document the difference between inspecting metadata, verifying decodability and comparing two recordings.
+
 ## 0.1.1
 
 - Reject decoded streams with zero audio samples during comparison.

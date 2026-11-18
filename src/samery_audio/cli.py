@@ -6,7 +6,16 @@ import sys
 from dataclasses import asdict
 from pathlib import Path
 
-from . import AudioInfo, Comparison, VerificationError, __version__, compare, probe
+from . import (
+    AudioInfo,
+    Comparison,
+    Verification,
+    VerificationError,
+    __version__,
+    compare,
+    probe,
+    verify,
+)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -15,17 +24,22 @@ def main(argv: list[str] | None = None) -> int:
     commands = parser.add_subparsers(dest="command", required=True)
     inspect = commands.add_parser("inspect", help="Read audio stream properties")
     inspect.add_argument("source", type=Path)
+    verification = commands.add_parser("verify", help="Fully decode one file without a reference")
+    verification.add_argument("source", type=Path)
     comparison = commands.add_parser("compare", help="Compare decoded PCM and format properties")
     comparison.add_argument("source", type=Path)
     comparison.add_argument("candidate", type=Path)
-    for command in (inspect, comparison):
+    for command in (inspect, verification, comparison):
         command.add_argument("--json", action="store_true", help="Print a JSON report")
         command.add_argument("--timeout", type=float, default=300, help="Seconds per subprocess")
     args = parser.parse_args(argv)
-    result: AudioInfo | Comparison
+    result: AudioInfo | Verification | Comparison
     try:
         if args.command == "inspect":
             result = probe(args.source, timeout=args.timeout)
+            code = 0
+        elif args.command == "verify":
+            result = verify(args.source, timeout=args.timeout)
             code = 0
         else:
             result = compare(args.source, args.candidate, timeout=args.timeout)
@@ -52,6 +66,9 @@ def main(argv: list[str] | None = None) -> int:
         print(
             f"{result.codec.upper()} · {result.bit_depth}-bit · {result.sample_rate} Hz · {result.channels} channel(s)"
         )
+    elif isinstance(result, Verification):
+        print("PASS: first audio stream decoded successfully and contains samples.")
+        print(f"PCM SHA-256: {result.pcm_sha256}")
     else:
         print(
             "PASS: matching decoded PCM and format properties."

@@ -62,6 +62,14 @@ class Comparison:
     differences: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class Verification:
+    """Properties and PCM digest of one successfully decoded, nonempty stream."""
+
+    audio: AudioInfo
+    pcm_sha256: str
+
+
 def _validate_timeout(timeout: float) -> None:
     if not math.isfinite(timeout) or timeout <= 0:
         raise VerificationError("Timeout must be finite and positive.", code="invalid_timeout")
@@ -229,6 +237,42 @@ def pcm_sha256(path: str | Path, *, ffmpeg: str = "ffmpeg", timeout: float = 300
     return digest
 
 
+def _fingerprint(path: Path) -> tuple[int, int, int, int]:
+    try:
+        info = path.stat()
+    except OSError as exc:
+        raise VerificationError(
+            "An input became inaccessible during verification. Retry with stable files.",
+            code="file_access_error",
+        ) from exc
+    return info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns
+
+
+def verify(
+    path: str | Path,
+    *,
+    ffmpeg: str = "ffmpeg",
+    ffprobe: str = "ffprobe",
+    timeout: float = 300,
+) -> Verification:
+    """Decode one supported, nonempty audio stream without a reference file.
+
+    This checks decodability, not provenance or completeness against a manifest.
+    The timeout applies separately to the probe and decoder subprocesses.
+    """
+    _validate_timeout(timeout)
+    path = _local_file(path)
+    initial = _fingerprint(path)
+    audio = probe(path, ffprobe=ffprobe, timeout=timeout)
+    digest = pcm_sha256(path, ffmpeg=ffmpeg, timeout=timeout)
+    if initial != _fingerprint(path):
+        raise VerificationError(
+            "An input changed during verification; retry with stable files.",
+            code="input_changed",
+        )
+    return Verification(audio, digest)
+
+
 def compare(
     source: str | Path,
     candidate: str | Path,
@@ -241,17 +285,7 @@ def compare(
     _validate_timeout(timeout)
     source, candidate = _local_file(source), _local_file(candidate)
 
-    def fingerprint(path: Path) -> tuple[int, int, int, int]:
-        try:
-            info = path.stat()
-        except OSError as exc:
-            raise VerificationError(
-                "An input became inaccessible during verification. Retry with stable files.",
-                code="file_access_error",
-            ) from exc
-        return info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns
-
-    initial = fingerprint(source), fingerprint(candidate)
+    initial = _fingerprint(source), _fingerprint(candidate)
     first = probe(source, ffprobe=ffprobe, timeout=timeout)
     second = probe(candidate, ffprobe=ffprobe, timeout=timeout)
     differences = [
@@ -261,7 +295,7 @@ def compare(
     ]
     first_hash = pcm_sha256(source, ffmpeg=ffmpeg, timeout=timeout)
     second_hash = pcm_sha256(candidate, ffmpeg=ffmpeg, timeout=timeout)
-    if initial != (fingerprint(source), fingerprint(candidate)):
+    if initial != (_fingerprint(source), _fingerprint(candidate)):
         raise VerificationError(
             "An input changed during verification; retry with stable files.",
             code="input_changed",
