@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.1
+
+- Allow custom FFprobe executables in all CLI commands through `--ffprobe`.
+- Allow custom FFmpeg executables in `verify` and `compare` through `--ffmpeg`.
+- Support installations outside PATH and executable paths containing spaces without invoking a shell.
+- Keep structured error reports and exit code 2 when a selected executable is unavailable.
+
 ## 0.2.0
 
 - Add `verify(path)` and `samery-audio verify` to decode one supported audio stream without a reference file.

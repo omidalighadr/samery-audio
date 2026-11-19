@@ -6,6 +6,7 @@ import contextlib
 import io
 import json
 import math
+import os
 import shutil
 import subprocess
 import tempfile
@@ -154,6 +155,75 @@ class PCMIntegrationTests(unittest.TestCase):
             pcm_verify.verify(source, ffmpeg="this-decoder-does-not-exist")
         self.assertEqual(error.exception.code, "tool_not_found")
         self.assertEqual(error.exception.operation, "decode")
+
+    def test_cli_custom_tools_work_without_path(self):
+        source = self.wav()
+        ffmpeg = shutil.which("ffmpeg")
+        ffprobe = shutil.which("ffprobe")
+        for command in ("inspect", "verify", "compare"):
+            args = [command, str(source)]
+            if command == "compare":
+                args.append(str(source))
+            args += ["--ffprobe", ffprobe, "--json"]
+            if command != "inspect":
+                args += ["--ffmpeg", ffmpeg]
+            with (
+                self.subTest(command=command),
+                patch.dict(os.environ, {"PATH": ""}),
+                contextlib.redirect_stdout(io.StringIO()) as output,
+            ):
+                code = cli_main(args)
+            self.assertEqual(code, 0)
+            report = json.loads(output.getvalue())
+            if command == "inspect":
+                self.assertEqual(report["sample_rate"], 44100)
+            elif command == "verify":
+                self.assertEqual(report["audio"]["sample_rate"], 44100)
+            else:
+                self.assertTrue(report["equivalent"])
+
+    @unittest.skipIf(os.name == "nt", "Creating test symlinks requires Windows privileges")
+    def test_cli_tool_paths_with_spaces_and_shell_punctuation(self):
+        directory = self.root / "tools with spaces"
+        directory.mkdir()
+        # Semicolons are literal filename characters here, never shell syntax.
+        ffmpeg = directory / "decode;literal"
+        ffprobe = directory / "probe;literal"
+        ffmpeg.symlink_to(shutil.which("ffmpeg"))
+        ffprobe.symlink_to(shutil.which("ffprobe"))
+        source = self.wav()
+        with contextlib.redirect_stdout(io.StringIO()) as output:
+            code = cli_main(
+                [
+                    "verify",
+                    str(source),
+                    "--ffmpeg",
+                    str(ffmpeg),
+                    "--ffprobe",
+                    str(ffprobe),
+                    "--json",
+                ]
+            )
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(output.getvalue())["audio"]["channels"], 2)
+
+    def test_cli_missing_selected_tools_report_operation_and_error_code(self):
+        source = self.wav()
+        missing = str(self.root / "missing tool")
+        cases = [
+            (["inspect", str(source), "--ffprobe", missing], "probe"),
+            (["verify", str(source), "--ffprobe", missing], "probe"),
+            (["verify", str(source), "--ffmpeg", missing], "decode"),
+            (["compare", str(source), str(source), "--ffmpeg", missing], "decode"),
+        ]
+        for args, operation in cases:
+            with self.subTest(args=args), contextlib.redirect_stdout(io.StringIO()) as output:
+                code = cli_main([*args, "--json"])
+            self.assertEqual(code, 2)
+            report = json.loads(output.getvalue())
+            self.assertEqual(report["code"], "tool_not_found")
+            self.assertEqual(report["operation"], operation)
+            self.assertNotIn(str(self.root), output.getvalue())
 
     def test_32_bit_pcm_is_preserved(self):
         source = self.wav(bits=32)

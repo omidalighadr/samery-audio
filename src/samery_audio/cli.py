@@ -32,17 +32,38 @@ def main(argv: list[str] | None = None) -> int:
     for command in (inspect, verification, comparison):
         command.add_argument("--json", action="store_true", help="Print a JSON report")
         command.add_argument("--timeout", type=float, default=300, help="Seconds per subprocess")
+        command.add_argument(
+            "--ffprobe",
+            default="ffprobe",
+            metavar="EXECUTABLE",
+            help="FFprobe executable name or path (default: ffprobe on PATH)",
+        )
+    for command in (verification, comparison):
+        command.add_argument(
+            "--ffmpeg",
+            default="ffmpeg",
+            metavar="EXECUTABLE",
+            help="FFmpeg executable name or path (default: ffmpeg on PATH)",
+        )
     args = parser.parse_args(argv)
     result: AudioInfo | Verification | Comparison
     try:
         if args.command == "inspect":
-            result = probe(args.source, timeout=args.timeout)
+            result = probe(args.source, ffprobe=args.ffprobe, timeout=args.timeout)
             code = 0
         elif args.command == "verify":
-            result = verify(args.source, timeout=args.timeout)
+            result = verify(
+                args.source, ffmpeg=args.ffmpeg, ffprobe=args.ffprobe, timeout=args.timeout
+            )
             code = 0
         else:
-            result = compare(args.source, args.candidate, timeout=args.timeout)
+            result = compare(
+                args.source,
+                args.candidate,
+                ffmpeg=args.ffmpeg,
+                ffprobe=args.ffprobe,
+                timeout=args.timeout,
+            )
             code = 0 if result.equivalent else 1
     except VerificationError as error:
         if args.json:

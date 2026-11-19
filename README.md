@@ -38,6 +38,15 @@ samery-audio compare "original.m4a" "converted.flac" --timeout 600
 python -m samery_audio inspect "song.flac" --json
 ```
 
+If FFmpeg is installed outside PATH, provide its executable paths directly:
+
+```sh
+samery-audio verify "song.flac" --ffmpeg "/path to tools/ffmpeg" --ffprobe "/path to tools/ffprobe"
+samery-audio inspect "song.flac" --ffprobe "/path to tools/ffprobe"
+```
+
+On Windows, use the paths to `ffmpeg.exe` and `ffprobe.exe`. Quote paths containing spaces. Each option takes one executable path or name, not a shell command or a list of arguments. The selected tools run directly without a shell. Omitting the options preserves normal PATH lookup. Missing executables produce the existing `tool_not_found` error and exit code 2, including with `--json`.
+
 Choose a command based on the question you need answered:
 
 | Command | Purpose | Reference file needed? |
